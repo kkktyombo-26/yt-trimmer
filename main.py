@@ -11,6 +11,7 @@ Endpoints:
   GET  /health    — health check
 """
 
+import imageio_ffmpeg
 import os
 import re
 import sys
@@ -22,6 +23,10 @@ import threading
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+
+# ── ffmpeg setup (no apt/root needed) ────────────────────────────────────────
+_ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+os.environ["PATH"] = os.path.dirname(_ffmpeg_exe) + os.pathsep + os.environ.get("PATH", "")
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
