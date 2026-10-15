@@ -38,7 +38,7 @@ if Path(_COOKIES_SOURCE).exists():
 JOBS: dict[str, dict] = {}
 
 # ── Format strings ────────────────────────────────────────────────────────────
-CLIP_FORMAT   = "bestvideo[protocol=m3u8_native]+bestaudio[protocol=m3u8_native]/best[protocol=m3u8_native]/bestvideo+bestaudio/best"
+CLIP_FORMAT   = "bestvideo+bestaudio/best"
 RECORD_FORMAT = "bestvideo+bestaudio/best"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ def cookies_args() -> list[str]:
 app = FastAPI(
     title="YT Trim API",
     description="Download trimmed YouTube clips or record live streams via REST.",
-    version="1.3.0",
+    version="1.4.0",
 )
 
 app.add_middleware(
@@ -192,11 +192,12 @@ async def clip(req: ClipRequest):
 
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        "--download-sections", section,          # ← restored (was missing!)
-        "-f", CLIP_FORMAT,                       # ← clip format, not record format
+        "--download-sections", section,
+        "-f", CLIP_FORMAT,
         "--merge-output-format", "mp4",
         "--no-playlist",
-        *js_runtime_args(),                      # ← "node" not "nodejs"
+        "--remote-components", "ejs:github",     # ← fetch challenge solver
+        *js_runtime_args(),
         *cookies_args(),
         "-o", str(out_path),
         clean_url(req.url),
@@ -282,7 +283,8 @@ def record(req: RecordRequest, background_tasks: BackgroundTasks):
         "--no-playlist",
         "--live-from-start",
         "--hls-prefer-native",
-        *js_runtime_args(),                      # ← same helper, always correct
+        "--remote-components", "ejs:github",     # ← fetch challenge solver
+        *js_runtime_args(),
         *cookies_args(),
         "-o", str(out_path),
         req.url,
