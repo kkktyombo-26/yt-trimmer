@@ -7,7 +7,11 @@ pip install -r requirements.txt
 
 echo "==> Installing Node.js via nodeenv"
 pip install nodeenv
-nodeenv --node=20.19.0 "$HOME/.node" --prebuilt
+if [ ! -f "$HOME/.node/bin/node" ]; then
+  nodeenv --node=20.19.0 "$HOME/.node" --prebuilt
+else
+  echo "Node already installed, skipping"
+fi
 export PATH="$HOME/.node/bin:$PATH"
 node --version
 
