@@ -1,14 +1,6 @@
 """
 yt_trim_api — FastAPI service for downloading trimmed YouTube segments
 and recording live streams. Deployable on Render.
-
-Endpoints:
-  POST /clip           — download a trimmed clip, stream file back
-  POST /record         — start a live recording job
-  GET  /jobs/{id}      — poll job status
-  POST /jobs/{id}/stop — stop a live recording
-  GET  /jobs/{id}/download — download completed recording
-  GET  /health         — health check
 """
 
 import imageio_ffmpeg
@@ -24,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
-# ── ffmpeg setup (no apt/root needed) ────────────────────────────────────────
+# ── ffmpeg setup ──────────────────────────────────────────────────────────────
 _ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 os.environ["PATH"] = os.path.dirname(_ffmpeg_exe) + os.pathsep + os.environ.get("PATH", "")
 
@@ -34,31 +26,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
 # ── Config ────────────────────────────────────────────────────────────────────
-
-# ── Config ────────────────────────────────────────────────────────────────────
-
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/yt-trim"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
-# Copy cookies to /tmp so yt-dlp can write back updated cookies
 _COOKIES_SOURCE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
 COOKIES_FILE = "/tmp/yt-trim/cookies.txt"
 
 if Path(_COOKIES_SOURCE).exists():
     shutil.copy2(_COOKIES_SOURCE, COOKIES_FILE)
 
-# In-memory job store  {job_id: dict}
 JOBS: dict[str, dict] = {}
 
 # ── Format strings ────────────────────────────────────────────────────────────
-
-
-# New — prefers HLS (needed for ended livestreams)
-CLIP_FORMAT = "bestvideo[protocol=m3u8_native]+bestaudio[protocol=m3u8_native]/best[protocol=m3u8_native]/bestvideo+bestaudio/best"
+CLIP_FORMAT   = "bestvideo[protocol=m3u8_native]+bestaudio[protocol=m3u8_native]/best[protocol=m3u8_native]/bestvideo+bestaudio/best"
 RECORD_FORMAT = "bestvideo+bestaudio/best"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
 def to_seconds(t: str) -> int:
     t = t.strip().lstrip("t").rstrip("s")
     if re.fullmatch(r"\d+", t):
@@ -86,25 +69,31 @@ def clean_url(url: str) -> str:
 
 
 def detect_js_runtime() -> Optional[str]:
-    for r in ("node", "nodejs", "deno"):
+    for r in ("node", "deno", "bun"):
         if shutil.which(r):
             return r
     return None
 
 
+def js_runtime_args() -> list[str]:
+    """Return --js-runtimes flag with the correct runtime name, or empty list."""
+    runtime = detect_js_runtime()
+    if runtime:
+        return ["--js-runtimes", runtime]   # "node" not "nodejs"
+    return []
+
+
 def cookies_args() -> list[str]:
-    """Return --cookies flag if the cookies file exists, else empty list."""
     if Path(COOKIES_FILE).exists():
         return ["--cookies", COOKIES_FILE]
     return []
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
-
 app = FastAPI(
     title="YT Trim API",
     description="Download trimmed YouTube clips or record live streams via REST.",
-    version="1.2.0",
+    version="1.3.0",
 )
 
 app.add_middleware(
@@ -118,13 +107,12 @@ app.add_middleware(
 )
 
 
-# ── Request / Response models ─────────────────────────────────────────────────
-
+# ── Models ────────────────────────────────────────────────────────────────────
 class ClipRequest(BaseModel):
     url: str
-    start: str                  # HH:MM:SS or plain seconds
-    end: str                    # HH:MM:SS / seconds  OR  duration in seconds
-    end_mode: str = "endtime"   # "endtime" | "duration"
+    start: str
+    end: str
+    end_mode: str = "endtime"
     filename: str = "clip.mp4"
 
     @field_validator("end_mode")
@@ -158,7 +146,7 @@ class RecordRequest(BaseModel):
 
 class JobStatus(BaseModel):
     job_id: str
-    status: str          # "running" | "done" | "error" | "stopped"
+    status: str
     message: str
     started_at: str
     ended_at: Optional[str] = None
@@ -167,7 +155,6 @@ class JobStatus(BaseModel):
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
-
 @app.get("/health")
 def health():
     return {
@@ -180,13 +167,8 @@ def health():
 
 
 # ── /clip ─────────────────────────────────────────────────────────────────────
-
 @app.post("/clip", summary="Download a trimmed clip and stream it back")
 async def clip(req: ClipRequest):
-    """
-    Blocks until yt-dlp finishes, then streams the MP4 back.
-    Best for clips under ~5 minutes. For longer content use /record + /jobs.
-    """
     if not shutil.which("ffmpeg"):
         raise HTTPException(503, "ffmpeg not found on this server")
 
@@ -207,17 +189,16 @@ async def clip(req: ClipRequest):
     section = f"*{fmt(start_s)}-{fmt(end_s)}"
 
     cmd = [
-    sys.executable, "-m", "yt_dlp",
-    "-f", RECORD_FORMAT,
-    "--merge-output-format", "mp4",
-    "--no-playlist",
-    "--live-from-start",
-    "--hls-prefer-native",
-    "--js-runtimes", "nodejs",  
-    *cookies_args(),
-    "-o", str(out_path),
-    req.url,
-]
+        sys.executable, "-m", "yt_dlp",
+        "--download-sections", section,          # ← restored (was missing!)
+        "-f", CLIP_FORMAT,                       # ← clip format, not record format
+        "--merge-output-format", "mp4",
+        "--no-playlist",
+        *js_runtime_args(),                      # ← "node" not "nodejs"
+        *cookies_args(),
+        "-o", str(out_path),
+        clean_url(req.url),
+    ]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -246,10 +227,8 @@ async def clip(req: ClipRequest):
     )
 
 
-# ── /record (async job) ───────────────────────────────────────────────────────
-
+# ── /record ───────────────────────────────────────────────────────────────────
 def _run_record_job(job_id: str, cmd: list[str], out_path: Path):
-    """Runs in a background thread; updates JOBS[job_id]."""
     job = JOBS[job_id]
     try:
         proc = subprocess.Popen(
@@ -294,11 +273,6 @@ def record(req: RecordRequest, background_tasks: BackgroundTasks):
     out_dir.mkdir(parents=True)
     out_path = out_dir / req.filename
 
-    _YTDLP_RUNTIME_MAP = {"node": "nodejs", "nodejs": "nodejs", "deno": "deno"}
-    js_runtime    = detect_js_runtime()
-    ytdlp_runtime = _YTDLP_RUNTIME_MAP.get(js_runtime) if js_runtime else None
-    js_args       = ["--js-runtimes", ytdlp_runtime] if ytdlp_runtime else []
-
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "-f", RECORD_FORMAT,
@@ -306,7 +280,7 @@ def record(req: RecordRequest, background_tasks: BackgroundTasks):
         "--no-playlist",
         "--live-from-start",
         "--hls-prefer-native",
-        *js_args,
+        *js_runtime_args(),                      # ← same helper, always correct
         *cookies_args(),
         "-o", str(out_path),
         req.url,
@@ -332,7 +306,6 @@ def record(req: RecordRequest, background_tasks: BackgroundTasks):
 
 
 # ── Job management ────────────────────────────────────────────────────────────
-
 def _job_response(job_id: str) -> JobStatus:
     job = JOBS.get(job_id)
     if not job:
@@ -350,19 +323,16 @@ def _job_response(job_id: str) -> JobStatus:
 
 @app.get("/jobs/{job_id}", response_model=JobStatus)
 def job_status(job_id: str):
-    """Poll the status of a recording job."""
     return _job_response(job_id)
 
 
 @app.post("/jobs/{job_id}/stop", response_model=JobStatus)
 def job_stop(job_id: str):
-    """Gracefully stop a live recording."""
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, f"Job {job_id!r} not found")
     if job["status"] != "running":
         raise HTTPException(409, f"Job is not running (status: {job['status']})")
-
     proc: subprocess.Popen = job.get("proc")
     if proc:
         try:
