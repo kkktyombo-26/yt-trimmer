@@ -76,10 +76,12 @@ def detect_js_runtime() -> Optional[str]:
 
 
 def js_runtime_args() -> list[str]:
-    """Return --js-runtimes flag with the correct runtime name, or empty list."""
-    runtime = detect_js_runtime()
-    if runtime:
-        return ["--js-runtimes", runtime]   # "node" not "nodejs"
+    full_path = shutil.which("node")
+    if full_path:
+        return ["--js-runtimes", f"node:{full_path}"]
+    full_path = shutil.which("deno")
+    if full_path:
+        return ["--js-runtimes", f"deno:{full_path}"]
     return []
 
 
