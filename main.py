@@ -38,7 +38,10 @@ if Path(_COOKIES_SOURCE).exists():
 JOBS: dict[str, dict] = {}
 
 # ── Format strings ────────────────────────────────────────────────────────────
-CLIP_FORMAT   = "bestvideo+bestaudio/best"
+# Prefer fragmented-MP4 (avc1 + m4a). ffmpeg can seek/section these over HTTP,
+# even for live/just-ended broadcasts. VP9 .webm (itag 247) fails there with
+# "EBML header parsing failed". Falls back to anything if no mp4 exists.
+CLIP_FORMAT   = "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
 RECORD_FORMAT = "bestvideo+bestaudio/best"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -190,28 +193,36 @@ async def clip(req: ClipRequest):
 
     section = f"*{fmt(start_s)}-{fmt(end_s)}"
 
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--download-sections", section,
-        "-f", CLIP_FORMAT,
-        "--merge-output-format", "mp4",
-        "--no-playlist",
-        "--remote-components", "ejs:github",     # ← fetch challenge solver
-        *js_runtime_args(),
-        *cookies_args(),
-        "-o", str(out_path),
-        clean_url(req.url),
-    ]
+    def build_cmd(extra: list[str]) -> list[str]:
+        return [
+            sys.executable, "-m", "yt_dlp",
+            "--download-sections", section,
+            "-f", CLIP_FORMAT,
+            "--merge-output-format", "mp4",
+            "--no-playlist",
+            "--remote-components", "ejs:github",
+            *js_runtime_args(),
+            *cookies_args(),
+            *extra,
+            "-o", str(out_path),
+            clean_url(req.url),
+        ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    stdout, _ = await proc.communicate()
-
-    if proc.returncode != 0:
-        log = stdout.decode(errors="replace")
+    # Attempt 1: normal. Attempt 2 (live / just-ended streams): --live-from-start.
+    log = ""
+    for extra in ([], ["--live-from-start"]):
+        proc = await asyncio.create_subprocess_exec(
+            *build_cmd(extra),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await proc.communicate()
+        log += stdout.decode(errors="replace")
+        if proc.returncode == 0:
+            break
+        for f in out_dir.glob("*"):          # clear partial files before retry
+            f.unlink(missing_ok=True)
+    else:
         shutil.rmtree(out_dir, ignore_errors=True)
         raise HTTPException(500, f"yt-dlp failed:\n{log[-2000:]}")
 
@@ -222,11 +233,13 @@ async def clip(req: ClipRequest):
         else:
             raise HTTPException(500, "Output file not found after download")
 
+    cleanup = BackgroundTasks()
+    cleanup.add_task(shutil.rmtree, out_dir, ignore_errors=True)
     return FileResponse(
         path=str(out_path),
         media_type="video/mp4",
         filename=out_path.name,
-        background=BackgroundTasks(),
+        background=cleanup,
     )
 
 
