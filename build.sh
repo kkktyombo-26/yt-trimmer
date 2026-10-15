@@ -7,8 +7,8 @@ pip install -r requirements.txt
 
 echo "==> Installing Node.js via nodeenv"
 pip install nodeenv
-nodeenv --node=20.19.0 /opt/node --prebuilt
-export PATH="/opt/node/bin:$PATH"
+nodeenv --node=20.19.0 "$HOME/.node" --prebuilt
+export PATH="$HOME/.node/bin:$PATH"
 node --version
 
 echo "==> Verifying ffmpeg (bundled via imageio-ffmpeg)"
