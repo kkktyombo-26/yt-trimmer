@@ -30,6 +30,7 @@ os.environ["PATH"] = os.path.dirname(_ffmpeg_exe) + os.pathsep + os.environ.get(
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -89,6 +90,16 @@ app = FastAPI(
     title="YT Trim API",
     description="Download trimmed YouTube clips or record live streams via REST.",
     version="1.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://www.kkktdmpyombo.org",
+        "https://kkktdmpyombo.org",       # cover the non-www variant too
+    ],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
