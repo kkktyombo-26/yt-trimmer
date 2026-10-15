@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 set -e
 
-echo "==> Installing system dependencies"
-apt-get update -qq
-apt-get install -y --no-install-recommends ffmpeg curl ca-certificates
-
-echo "==> Installing Node.js 20 (LTS)"
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt-get install -y nodejs
-node --version
-
 echo "==> Installing Python dependencies"
 pip install --upgrade pip
 pip install -r requirements.txt
 
+echo "==> Installing Node.js via nodeenv"
+pip install nodeenv
+nodeenv --node=20.19.0 /opt/node --prebuilt
+export PATH="/opt/node/bin:$PATH"
+node --version
+
+echo "==> Verifying ffmpeg (bundled via imageio-ffmpeg)"
+python -c "import imageio_ffmpeg; print('ffmpeg:', imageio_ffmpeg.get_ffmpeg_exe())"
+
 echo "==> Build complete"
-ffmpeg -version | head -1
 yt-dlp --version
