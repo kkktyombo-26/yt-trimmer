@@ -51,8 +51,7 @@ if Path(_COOKIES_SOURCE).exists():
 JOBS: dict[str, dict] = {}
 
 # ── Format strings ────────────────────────────────────────────────────────────
-# Old
-CLIP_FORMAT = "bestvideo+bestaudio/best"
+
 
 # New — prefers HLS (needed for ended livestreams)
 CLIP_FORMAT = "bestvideo[protocol=m3u8_native]+bestaudio[protocol=m3u8_native]/best[protocol=m3u8_native]/bestvideo+bestaudio/best"
@@ -208,15 +207,17 @@ async def clip(req: ClipRequest):
     section = f"*{fmt(start_s)}-{fmt(end_s)}"
 
     cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--download-sections", section,
-        "-f", CLIP_FORMAT,
-        "--merge-output-format", "mp4",
-        "--no-playlist",
-        *cookies_args(),
-        "-o", str(out_path),
-        clean_url(req.url),
-    ]
+    sys.executable, "-m", "yt_dlp",
+    "-f", RECORD_FORMAT,
+    "--merge-output-format", "mp4",
+    "--no-playlist",
+    "--live-from-start",
+    "--hls-prefer-native",
+    "--js-runtimes", "nodejs",  
+    *cookies_args(),
+    "-o", str(out_path),
+    req.url,
+]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
