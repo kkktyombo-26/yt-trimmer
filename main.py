@@ -3,12 +3,12 @@ yt_trim_api — FastAPI service for downloading trimmed YouTube segments
 and recording live streams. Deployable on Render.
 
 Endpoints:
-  POST /clip      — download a trimmed clip, stream file back
-  POST /record    — start a live recording job
-  GET  /jobs/{id} — poll job status
+  POST /clip           — download a trimmed clip, stream file back
+  POST /record         — start a live recording job
+  GET  /jobs/{id}      — poll job status
   POST /jobs/{id}/stop — stop a live recording
   GET  /jobs/{id}/download — download completed recording
-  GET  /health    — health check
+  GET  /health         — health check
 """
 
 import imageio_ffmpeg
@@ -29,7 +29,7 @@ _ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 os.environ["PATH"] = os.path.dirname(_ffmpeg_exe) + os.pathsep + os.environ.get("PATH", "")
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -40,7 +40,15 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 # In-memory job store  {job_id: dict}
 JOBS: dict[str, dict] = {}
 
-# ── Helpers (ported from GUI) ─────────────────────────────────────────────────
+# ── Format strings ────────────────────────────────────────────────────────────
+# Used by both /clip and /record.
+# YouTube serves regular videos as DASH (not HLS), so we ask for the best
+# separate video+audio streams and let yt-dlp merge them via ffmpeg.
+# --merge-output-format mp4 ensures the container is always .mp4.
+CLIP_FORMAT   = "bestvideo+bestaudio/best"
+RECORD_FORMAT = "bestvideo+bestaudio/best"
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def to_seconds(t: str) -> int:
     t = t.strip().lstrip("t").rstrip("s")
@@ -80,7 +88,7 @@ def detect_js_runtime() -> Optional[str]:
 app = FastAPI(
     title="YT Trim API",
     description="Download trimmed YouTube clips or record live streams via REST.",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -88,8 +96,8 @@ app = FastAPI(
 
 class ClipRequest(BaseModel):
     url: str
-    start: str          # HH:MM:SS or plain seconds
-    end: str            # HH:MM:SS / seconds  OR  duration in seconds
+    start: str                  # HH:MM:SS or plain seconds
+    end: str                    # HH:MM:SS / seconds  OR  duration in seconds
     end_mode: str = "endtime"   # "endtime" | "duration"
     filename: str = "clip.mp4"
 
@@ -103,7 +111,6 @@ class ClipRequest(BaseModel):
     @field_validator("filename")
     @classmethod
     def safe_filename(cls, v):
-        # Strip any path components
         v = Path(v).name
         if not v.endswith(".mp4"):
             v += ".mp4"
@@ -138,9 +145,9 @@ class JobStatus(BaseModel):
 @app.get("/health")
 def health():
     return {
-        "status": "ok",
-        "ffmpeg": bool(shutil.which("ffmpeg")),
-        "yt_dlp": bool(shutil.which("yt-dlp") or True),  # installed as package
+        "status":     "ok",
+        "ffmpeg":     bool(shutil.which("ffmpeg")),
+        "yt_dlp":     True,   # installed as Python package
         "js_runtime": detect_js_runtime(),
     }
 
@@ -150,39 +157,33 @@ def health():
 @app.post("/clip", summary="Download a trimmed clip and stream it back")
 async def clip(req: ClipRequest):
     """
-    Blocks until yt-dlp finishes, then streams the MP4 back to the caller.
-    Suitable for short clips (< a few minutes). For longer downloads, use
-    the async /record + /jobs pattern instead.
+    Blocks until yt-dlp finishes, then streams the MP4 back.
+    Best for clips under ~5 minutes. For longer content use /record + /jobs.
     """
     if not shutil.which("ffmpeg"):
         raise HTTPException(503, "ffmpeg not found on this server")
 
     try:
         start_s = to_seconds(req.start)
-        if req.end_mode == "duration":
-            end_s = start_s + int(req.end)
-        else:
-            end_s = to_seconds(req.end)
+        end_s   = start_s + int(req.end) if req.end_mode == "duration" else to_seconds(req.end)
     except Exception as e:
         raise HTTPException(422, f"Invalid time value: {e}")
 
     if end_s <= start_s:
         raise HTTPException(422, "end must be after start")
 
-    job_id  = uuid.uuid4().hex
-    out_dir = WORK_DIR / job_id
+    job_id   = uuid.uuid4().hex
+    out_dir  = WORK_DIR / job_id
     out_dir.mkdir(parents=True)
     out_path = out_dir / req.filename
 
     section = f"*{fmt(start_s)}-{fmt(end_s)}"
-    FORMAT  = (
-        "bestvideo[protocol=m3u8_native]+bestaudio[protocol=m3u8_native]"
-        "/best[protocol=m3u8_native]/bestvideo+bestaudio/best"
-    )
+
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--download-sections", section,
-        "-f", FORMAT,
+        "-f", CLIP_FORMAT,
+        "--merge-output-format", "mp4",   # always produce .mp4
         "--no-playlist",
         "-o", str(out_path),
         clean_url(req.url),
@@ -201,7 +202,7 @@ async def clip(req: ClipRequest):
         raise HTTPException(500, f"yt-dlp failed:\n{log[-2000:]}")
 
     if not out_path.exists():
-        # yt-dlp may have added an extension
+        # yt-dlp may have added an extension — pick whatever was written
         candidates = list(out_dir.glob("*"))
         if candidates:
             out_path = candidates[0]
@@ -247,9 +248,9 @@ def _run_record_job(job_id: str, cmd: list[str], out_path: Path):
             job["status"]  = "error"
             job["message"] = f"yt-dlp exited with code {rc}"
     except Exception as e:
-        job["status"]    = "error"
-        job["message"]   = str(e)
-        job["ended_at"]  = datetime.utcnow().isoformat()
+        job["status"]   = "error"
+        job["message"]  = str(e)
+        job["ended_at"] = datetime.utcnow().isoformat()
     finally:
         job.pop("proc", None)
 
@@ -265,13 +266,14 @@ def record(req: RecordRequest, background_tasks: BackgroundTasks):
     out_path = out_dir / req.filename
 
     _YTDLP_RUNTIME_MAP = {"node": "nodejs", "nodejs": "nodejs", "deno": "deno"}
-    js_runtime   = detect_js_runtime()
+    js_runtime    = detect_js_runtime()
     ytdlp_runtime = _YTDLP_RUNTIME_MAP.get(js_runtime) if js_runtime else None
-    js_args      = ["--js-runtimes", ytdlp_runtime] if ytdlp_runtime else []
+    js_args       = ["--js-runtimes", ytdlp_runtime] if ytdlp_runtime else []
 
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        "-f", "bestvideo+bestaudio/best",
+        "-f", RECORD_FORMAT,
+        "--merge-output-format", "mp4",
         "--no-playlist",
         "--live-from-start",
         "--hls-prefer-native",
@@ -292,10 +294,9 @@ def record(req: RecordRequest, background_tasks: BackgroundTasks):
     }
     JOBS[job_id] = job
 
-    thread = threading.Thread(
+    threading.Thread(
         target=_run_record_job, args=(job_id, cmd, out_path), daemon=True
-    )
-    thread.start()
+    ).start()
 
     return _job_response(job_id)
 
