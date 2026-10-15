@@ -35,16 +35,27 @@ from pydantic import BaseModel, field_validator
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
+# ── Config ────────────────────────────────────────────────────────────────────
+
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/yt-trim"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
-COOKIES_FILE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+# Copy cookies to /tmp so yt-dlp can write back updated cookies
+_COOKIES_SOURCE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+COOKIES_FILE = "/tmp/yt-trim/cookies.txt"
+
+if Path(_COOKIES_SOURCE).exists():
+    shutil.copy2(_COOKIES_SOURCE, COOKIES_FILE)
 
 # In-memory job store  {job_id: dict}
 JOBS: dict[str, dict] = {}
 
 # ── Format strings ────────────────────────────────────────────────────────────
-CLIP_FORMAT   = "bestvideo+bestaudio/best"
+# Old
+CLIP_FORMAT = "bestvideo+bestaudio/best"
+
+# New — prefers HLS (needed for ended livestreams)
+CLIP_FORMAT = "bestvideo[protocol=m3u8_native]+bestaudio[protocol=m3u8_native]/best[protocol=m3u8_native]/bestvideo+bestaudio/best"
 RECORD_FORMAT = "bestvideo+bestaudio/best"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
