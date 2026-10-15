@@ -88,6 +88,14 @@ def js_runtime_args() -> list[str]:
     return []
 
 
+def _short_log(text: str, keep: int = 12) -> str:
+    """Strip the huge signed googlevideo URLs and keep the informative lines."""
+    text = re.sub(r"https?://\S+", lambda m: m.group(0).split("?")[0] + "?…", text)
+    lines = [l for l in text.splitlines() if l.strip()]
+    picked = [l for l in lines if "Downloading 1 format" in l or "time ranges" in l]
+    return "\n".join(picked + lines[-keep:])
+
+
 def cookies_args() -> list[str]:
     if Path(COOKIES_FILE).exists():
         return ["--cookies", COOKIES_FILE]
@@ -208,23 +216,41 @@ async def clip(req: ClipRequest):
             clean_url(req.url),
         ]
 
-    # Attempt 1: normal. Attempt 2 (live / just-ended streams): --live-from-start.
-    log = ""
-    for extra in ([], ["--live-from-start"]):
+    # Live / just-ended broadcasts serve DASH with no Content-Length (noclen=1),
+    # so ffmpeg's HTTP seeking can break ("Invalid data found"). Try, in order:
+    #   1. plain MP4 (avc1+m4a)
+    #   2. same, but force linear (non-seekable) HTTP reads in ffmpeg
+    #   3. HLS formats via the web_safari client (ffmpeg handles HLS sections well)
+    HLS_FMT = ("bestvideo[protocol=m3u8_native]+bestaudio[protocol=m3u8_native]"
+               "/best[protocol=m3u8_native]/bestvideo+bestaudio/best")
+    attempts = [
+        # Same selector as the local GUI (known to work there): HLS first.
+        ("hls",         ["-f", HLS_FMT]),
+        # Force a client that actually serves HLS manifests.
+        ("hls-safari",  ["--extractor-args", "youtube:player_client=web_safari,tv,ios",
+                         "-f", HLS_FMT]),
+        ("mp4",         []),
+        ("mp4-linear",  ["--downloader-args", "ffmpeg_i:-seekable 0"]),
+    ]
+    report: list[str] = []
+    ok = False
+    for name, extra in attempts:
         proc = await asyncio.create_subprocess_exec(
             *build_cmd(extra),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
         stdout, _ = await proc.communicate()
-        log += stdout.decode(errors="replace")
+        text = stdout.decode(errors="replace")
         if proc.returncode == 0:
+            ok = True
             break
+        report.append(f"--- attempt '{name}' ---\n{_short_log(text)}")
         for f in out_dir.glob("*"):          # clear partial files before retry
             f.unlink(missing_ok=True)
-    else:
+    if not ok:
         shutil.rmtree(out_dir, ignore_errors=True)
-        raise HTTPException(500, f"yt-dlp failed:\n{log[-2000:]}")
+        raise HTTPException(500, "yt-dlp failed:\n" + "\n".join(report))
 
     if not out_path.exists():
         candidates = list(out_dir.glob("*"))
