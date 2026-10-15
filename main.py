@@ -38,14 +38,12 @@ from pydantic import BaseModel, field_validator
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/yt-trim"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
+COOKIES_FILE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+
 # In-memory job store  {job_id: dict}
 JOBS: dict[str, dict] = {}
 
 # ── Format strings ────────────────────────────────────────────────────────────
-# Used by both /clip and /record.
-# YouTube serves regular videos as DASH (not HLS), so we ask for the best
-# separate video+audio streams and let yt-dlp merge them via ffmpeg.
-# --merge-output-format mp4 ensures the container is always .mp4.
 CLIP_FORMAT   = "bestvideo+bestaudio/best"
 RECORD_FORMAT = "bestvideo+bestaudio/best"
 
@@ -84,19 +82,26 @@ def detect_js_runtime() -> Optional[str]:
     return None
 
 
+def cookies_args() -> list[str]:
+    """Return --cookies flag if the cookies file exists, else empty list."""
+    if Path(COOKIES_FILE).exists():
+        return ["--cookies", COOKIES_FILE]
+    return []
+
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="YT Trim API",
     description="Download trimmed YouTube clips or record live streams via REST.",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://www.kkktdmpyombo.org",
-        "https://kkktdmpyombo.org",       # cover the non-www variant too
+        "https://kkktdmpyombo.org",
     ],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
@@ -156,10 +161,11 @@ class JobStatus(BaseModel):
 @app.get("/health")
 def health():
     return {
-        "status":     "ok",
-        "ffmpeg":     bool(shutil.which("ffmpeg")),
-        "yt_dlp":     True,   # installed as Python package
-        "js_runtime": detect_js_runtime(),
+        "status":       "ok",
+        "ffmpeg":       bool(shutil.which("ffmpeg")),
+        "yt_dlp":       True,
+        "js_runtime":   detect_js_runtime(),
+        "cookies_file": Path(COOKIES_FILE).exists(),
     }
 
 
@@ -194,8 +200,9 @@ async def clip(req: ClipRequest):
         sys.executable, "-m", "yt_dlp",
         "--download-sections", section,
         "-f", CLIP_FORMAT,
-        "--merge-output-format", "mp4",   # always produce .mp4
+        "--merge-output-format", "mp4",
         "--no-playlist",
+        *cookies_args(),
         "-o", str(out_path),
         clean_url(req.url),
     ]
@@ -213,7 +220,6 @@ async def clip(req: ClipRequest):
         raise HTTPException(500, f"yt-dlp failed:\n{log[-2000:]}")
 
     if not out_path.exists():
-        # yt-dlp may have added an extension — pick whatever was written
         candidates = list(out_dir.glob("*"))
         if candidates:
             out_path = candidates[0]
@@ -289,6 +295,7 @@ def record(req: RecordRequest, background_tasks: BackgroundTasks):
         "--live-from-start",
         "--hls-prefer-native",
         *js_args,
+        *cookies_args(),
         "-o", str(out_path),
         req.url,
     ]
