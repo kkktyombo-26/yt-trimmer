@@ -114,6 +114,8 @@ app.add_middleware(
     allow_origins=[
         "https://www.kkktdmpyombo.org",
         "https://kkktdmpyombo.org",
+        "https://bari-software-services.online",
+        "https://www.bari-software-services.online",
     ],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
